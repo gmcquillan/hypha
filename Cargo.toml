@@ -1,0 +1,52 @@
+[package]
+name = "hypha"
+version = "0.1.0"
+edition = "2021"
+description = "A capability-based cooperation protocol for P2P applications"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "hypha"
+path = "src/main.rs"
+
+[lib]
+name = "hypha"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# QUIC transport
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# Cryptography
+ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
+rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+rcgen = "0.13"
+x509-parser = "0.16"
+
+# Serialization
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+base64 = "0.22"
+
+# Storage
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Utilities
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
