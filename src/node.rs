@@ -242,9 +242,23 @@ impl HyphaNode {
             .await
             .map_err(|e| HyphaError::Internal(format!("handshake init write: {e}")))?;
 
-        // For PoC, use a placeholder TLS exporter value
-        // Full implementation would extract from the QUIC connection
-        let tls_exporter = [0u8; 32]; // TODO: extract real TLS exporter
+        // Verify the server's TLS cert pubkey matches the invite's issuer_pubkey.
+        // This prevents MITM — we only proceed if we're talking to the right node.
+        let expected_pubkey = token.issuer_pubkey_array()?;
+        let server_cert = transport::extract_peer_cert(&connection)?;
+        let server_pubkey = transport::extract_pubkey_from_cert(&server_cert)?;
+        if server_pubkey != expected_pubkey {
+            return Err(HyphaError::HandshakeFailed {
+                detail: format!(
+                    "server cert pubkey mismatch: expected {}, got {}",
+                    hex::encode(expected_pubkey),
+                    hex::encode(server_pubkey),
+                ),
+            });
+        }
+
+        // Extract real TLS exporter for channel binding
+        let tls_exporter = transport::extract_tls_exporter(&connection)?;
 
         let token_secret = token.token_secret_array()?;
         let welcome = handshake::client_claim_handshake(
@@ -332,8 +346,8 @@ async fn handle_connection(
         })?;
     info!("starting handshake");
 
-    // Placeholder TLS exporter
-    let tls_exporter = [0u8; 32]; // TODO: extract real TLS exporter
+    // Extract real TLS exporter for channel binding
+    let tls_exporter = transport::extract_tls_exporter(&conn)?;
 
     let peer = handshake::server_handshake(
         &mut send,

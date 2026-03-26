@@ -64,15 +64,20 @@ impl NodeKeypair {
         &self.signing_key
     }
 
-    /// Generate a self-signed TLS certificate from this keypair.
-    /// The cert exists only because QUIC requires one structurally.
+    /// Generate a self-signed TLS certificate using the node's Ed25519 identity key.
+    /// This ensures the cert's public key matches the node's pubkey, allowing
+    /// peers to verify identity by inspecting the TLS certificate.
     pub fn generate_tls_cert(&self) -> Result<(rustls::pki_types::CertificateDer<'static>, rustls::pki_types::PrivateKeyDer<'static>)> {
-        // Generate a separate rcgen keypair for the TLS certificate.
-        // We can't easily inject our Ed25519 key into rcgen 0.13's API,
-        // so we generate a fresh keypair for TLS. The Hypha protocol layer
-        // handles identity verification via the handshake, not the TLS cert.
-        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
-            .map_err(|e| HyphaError::Crypto(format!("failed to generate TLS keypair: {e}")))?;
+        // Wrap our ed25519-dalek key in PKCS8 DER format for rcgen
+        let pkcs8_der = ed25519_signing_key_to_pkcs8(&self.signing_key);
+        let private_key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(pkcs8_der);
+        let private_key = rustls::pki_types::PrivateKeyDer::Pkcs8(private_key_der.clone_key());
+
+        let key_pair = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(
+            &private_key_der,
+            &rcgen::PKCS_ED25519,
+        )
+        .map_err(|e| HyphaError::Crypto(format!("failed to create rcgen keypair: {e}")))?;
 
         let params = CertificateParams::new(vec!["hypha.local".into()])
             .map_err(|e| HyphaError::Crypto(format!("failed to create cert params: {e}")))?;
@@ -82,12 +87,37 @@ impl NodeKeypair {
             .map_err(|e| HyphaError::Crypto(format!("failed to self-sign cert: {e}")))?;
 
         let cert_der = cert.der().clone();
-        let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-            rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der()),
-        );
-
-        Ok((cert_der, key_der))
+        Ok((cert_der, private_key))
     }
+}
+
+/// Wrap an Ed25519 signing key in PKCS8 v1 DER format.
+/// This is the format ring/rcgen/rustls expect for Ed25519 private keys.
+///
+/// PKCS8 v1 structure for Ed25519 (RFC 8410):
+///   SEQUENCE {
+///     INTEGER 0                               -- version (v1)
+///     SEQUENCE { OID 1.3.101.112 }            -- Ed25519 algorithm
+///     OCTET STRING { OCTET STRING { 32-byte private key } }
+///   }
+fn ed25519_signing_key_to_pkcs8(key: &SigningKey) -> Vec<u8> {
+    let private_bytes = key.to_bytes();
+
+    // Fixed PKCS8 v1 DER prefix for Ed25519 (RFC 8410 Section 7)
+    // Total: 16 bytes prefix + 32 bytes key = 48 bytes
+    let mut der = Vec::with_capacity(48);
+
+    // SEQUENCE { length 46 }
+    der.extend_from_slice(&[0x30, 0x2e]);
+    // INTEGER 0 (version)
+    der.extend_from_slice(&[0x02, 0x01, 0x00]);
+    // SEQUENCE { OID 1.3.101.112 (Ed25519) }
+    der.extend_from_slice(&[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70]);
+    // OCTET STRING { OCTET STRING { 32-byte key } }
+    der.extend_from_slice(&[0x04, 0x22, 0x04, 0x20]);
+    der.extend_from_slice(&private_bytes);
+
+    der
 }
 
 /// Generate a random 32-byte nonce for challenge-response.
@@ -200,5 +230,18 @@ mod tests {
         let kp = NodeKeypair::generate();
         let result = kp.generate_tls_cert();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_tls_cert_uses_node_identity_key() {
+        let kp = NodeKeypair::generate();
+        let (cert_der, _key_der) = kp.generate_tls_cert().unwrap();
+
+        // Extract the public key from the certificate
+        let cert_pubkey = crate::transport::extract_pubkey_from_cert(&cert_der).unwrap();
+
+        // It should match the node's identity key
+        assert_eq!(cert_pubkey, kp.public_key_bytes(),
+            "TLS cert pubkey must match node identity key");
     }
 }

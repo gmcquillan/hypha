@@ -106,6 +106,33 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     }
 }
 
+/// Extract the TLS exporter value for channel binding (RFC 5705).
+/// Both peers calling this with the same label get the same value,
+/// binding the Hypha handshake to this specific TLS session.
+pub fn extract_tls_exporter(conn: &quinn::Connection) -> Result<[u8; 32]> {
+    let mut output = [0u8; 32];
+    conn.export_keying_material(&mut output, b"hypha-channel-binding", b"")
+        .map_err(|e| HyphaError::Crypto(format!("TLS exporter failed: {e:?}")))?;
+    Ok(output)
+}
+
+/// Extract the peer's TLS certificate from a quinn connection.
+/// Returns the first certificate in the peer's chain (the leaf cert).
+pub fn extract_peer_cert(conn: &quinn::Connection) -> Result<rustls::pki_types::CertificateDer<'static>> {
+    let peer_identity = conn
+        .peer_identity()
+        .ok_or_else(|| HyphaError::Crypto("no peer identity available".into()))?;
+
+    let certs = peer_identity
+        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        .map_err(|_| HyphaError::Crypto("unexpected peer identity type".into()))?;
+
+    certs
+        .into_iter()
+        .next()
+        .ok_or_else(|| HyphaError::Crypto("peer certificate chain is empty".into()))
+}
+
 /// Extract the Ed25519 public key from a peer's TLS certificate.
 /// Returns None if the cert doesn't use Ed25519.
 pub fn extract_pubkey_from_cert(cert_der: &CertificateDer<'_>) -> Result<[u8; 32]> {
