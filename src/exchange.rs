@@ -20,6 +20,12 @@ pub struct Exchange {
     next_req_id: Mutex<u32>,
 }
 
+impl Default for Exchange {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Exchange {
     pub fn new() -> Self {
         Self {

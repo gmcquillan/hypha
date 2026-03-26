@@ -253,13 +253,11 @@ fn find_signing_peer(
     // Query all pins for this token
     let peers = store.list_peers()?;
     for (pubkey_bytes, _record) in &peers {
-        if pubkey_bytes.len() == 32 {
-            if store.is_pinned(token_id, pubkey_bytes)? {
-                let mut pubkey = [0u8; 32];
-                pubkey.copy_from_slice(pubkey_bytes);
-                if crypto::verify_signature(&pubkey, message, sig).is_ok() {
-                    return Ok(pubkey);
-                }
+        if pubkey_bytes.len() == 32 && store.is_pinned(token_id, pubkey_bytes)? {
+            let mut pubkey = [0u8; 32];
+            pubkey.copy_from_slice(pubkey_bytes);
+            if crypto::verify_signature(&pubkey, message, sig).is_ok() {
+                return Ok(pubkey);
             }
         }
     }

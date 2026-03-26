@@ -288,7 +288,7 @@ mod tests {
         let pubkey = vec![3u8; 32];
 
         store
-            .insert_token(&token_id, &secret, &vec!["search".into()], 1, None)
+            .insert_token(&token_id, &secret, &["search".into()], 1, None)
             .unwrap();
 
         assert!(!store.is_pinned(&token_id, &pubkey).unwrap());
@@ -304,7 +304,7 @@ mod tests {
         let store = PeerStore::open_memory().unwrap();
         let token_id = vec![1u8; 16];
         store
-            .insert_token(&token_id, &vec![2u8; 32], &vec!["search".into()], 1, None)
+            .insert_token(&token_id, &[2u8; 32], &["search".into()], 1, None)
             .unwrap();
 
         store.revoke_token(&token_id).unwrap();
@@ -335,10 +335,10 @@ mod tests {
     fn test_list_peers() {
         let store = PeerStore::open_memory().unwrap();
         store
-            .upsert_peer(&vec![1u8; 32], "10.0.0.1:4433", None)
+            .upsert_peer(&[1u8; 32], "10.0.0.1:4433", None)
             .unwrap();
         store
-            .upsert_peer(&vec![2u8; 32], "10.0.0.2:4433", None)
+            .upsert_peer(&[2u8; 32], "10.0.0.2:4433", None)
             .unwrap();
 
         let peers = store.list_peers().unwrap();
@@ -354,8 +354,8 @@ mod tests {
         store
             .insert_token(
                 &token_id,
-                &vec![2u8; 32],
-                &vec!["search".into(), "stats".into()],
+                &[2u8; 32],
+                &["search".into(), "stats".into()],
                 1,
                 None,
             )
@@ -369,6 +369,6 @@ mod tests {
     #[test]
     fn test_unknown_token_returns_none() {
         let store = PeerStore::open_memory().unwrap();
-        assert!(store.get_token(&vec![99u8; 16]).unwrap().is_none());
+        assert!(store.get_token(&[99u8; 16]).unwrap().is_none());
     }
 }

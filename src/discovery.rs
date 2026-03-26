@@ -2,7 +2,6 @@ use crate::messages::{self, AddrUpdate, LastSeen, Message, Whereis};
 use crate::store::PeerStore;
 use crate::Result;
 
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Handle an incoming Whereis query.
 /// Returns Some(LastSeen) if we know the peer, None otherwise (silence = unknown).
@@ -60,12 +59,6 @@ pub async fn query_whereis(
     }
 }
 
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
 
 #[cfg(test)]
 mod tests {
