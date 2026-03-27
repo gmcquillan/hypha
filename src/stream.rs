@@ -1,7 +1,11 @@
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::Result;
 
@@ -68,6 +72,51 @@ pub struct SubscriptionReceiver {
     pub(crate) dropped: Arc<AtomicU32>,
 }
 
+/// Type alias for an async subscribe handler function.
+/// Receives a Subscription, returns a SubscriptionReceiver that the runtime reads events from.
+pub type SubscribeHandlerFn = Arc<
+    dyn Fn(Subscription) -> Pin<Box<dyn Future<Output = Result<SubscriptionReceiver>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Manages registered subscribe handlers and sub_id allocation.
+pub struct StreamManager {
+    pub(crate) handlers: RwLock<HashMap<String, SubscribeHandlerFn>>,
+    next_id: Mutex<u32>,
+}
+
+impl Default for StreamManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamManager {
+    pub fn new() -> Self {
+        Self {
+            handlers: RwLock::new(HashMap::new()),
+            next_id: Mutex::new(1),
+        }
+    }
+
+    /// Register a handler for a subscribe scope.
+    pub async fn register_handler(&self, scope: &str, handler: SubscribeHandlerFn) {
+        self.handlers
+            .write()
+            .await
+            .insert(scope.to_string(), handler);
+    }
+
+    /// Allocate the next subscription ID.
+    pub async fn next_sub_id(&self) -> u32 {
+        let mut id = self.next_id.lock().await;
+        let sub_id = *id;
+        *id = id.wrapping_add(1);
+        sub_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +168,30 @@ mod tests {
 
         let result = tx.send(b"event".to_vec());
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stream_manager_register_handler() {
+        let mgr = StreamManager::new();
+        let handler: SubscribeHandlerFn = Arc::new(|sub| {
+            Box::pin(async move {
+                let (_, rx) = sub.channel(8);
+                Ok(rx)
+            })
+        });
+        mgr.register_handler("events", handler).await;
+
+        let handlers = mgr.handlers.read().await;
+        assert!(handlers.contains_key("events"));
+        assert!(!handlers.contains_key("unknown"));
+    }
+
+    #[tokio::test]
+    async fn test_stream_manager_sub_id_allocation() {
+        let mgr = StreamManager::new();
+        let id1 = mgr.next_sub_id().await;
+        let id2 = mgr.next_sub_id().await;
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
     }
 }
