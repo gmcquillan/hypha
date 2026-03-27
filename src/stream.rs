@@ -226,6 +226,64 @@ pub async fn handle_subscribe(
     Ok(())
 }
 
+/// Subscriber-side handle to an active subscription.
+/// Call `next()` to receive events, `unsubscribe()` to stop.
+pub struct SubscriptionStream {
+    sub_id: u32,
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+    unsubscribed: bool,
+}
+
+impl SubscriptionStream {
+    /// Create a new SubscriptionStream (called internally by Peer::subscribe).
+    pub(crate) fn new(
+        sub_id: u32,
+        send: quinn::SendStream,
+        recv: quinn::RecvStream,
+    ) -> Self {
+        Self {
+            sub_id,
+            send,
+            recv,
+            unsubscribed: false,
+        }
+    }
+
+    /// Receive the next event. Returns None when the producer ends the subscription.
+    pub async fn next(&mut self) -> Option<EventData> {
+        match messages::read_message(&mut self.recv).await {
+            Ok(Message::Event(e)) => Some(EventData {
+                body: e.body,
+                dropped_count: e.dropped_count,
+            }),
+            _ => None, // Stream closed, error, or unexpected message
+        }
+    }
+
+    /// Explicitly unsubscribe. Sends the Unsubscribe message to the producer.
+    pub async fn unsubscribe(&mut self) -> Result<()> {
+        if !self.unsubscribed {
+            let msg = Message::Unsubscribe(crate::messages::Unsubscribe {
+                sub_id: self.sub_id,
+            });
+            // Best-effort send -- if the stream is already closed, that's fine
+            let _ = messages::write_message(&mut self.send, &msg).await;
+            self.unsubscribed = true;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SubscriptionStream {
+    fn drop(&mut self) {
+        if !self.unsubscribed {
+            // Best-effort: reset the stream to signal the producer.
+            let _ = self.send.reset(quinn::VarInt::from_u32(0));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
