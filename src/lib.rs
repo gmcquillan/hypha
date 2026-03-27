@@ -6,6 +6,7 @@ pub mod handshake;
 pub mod messages;
 pub mod node;
 pub mod store;
+pub mod stream;
 pub mod transport;
 
 pub use node::HyphaNode;
