@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::{Mutex, RwLock};
 
+use crate::messages::{self, Event as EventMsg, Message, Response};
 use crate::Result;
 
 /// Data returned to the subscriber for each event.
@@ -115,6 +116,114 @@ impl StreamManager {
         *id = id.wrapping_add(1);
         sub_id
     }
+}
+
+/// Handle an incoming Subscribe message on the producer side.
+/// Checks scope, dispatches to handler, runs the event send loop.
+pub async fn handle_subscribe(
+    stream_mgr: &StreamManager,
+    sub_msg: crate::messages::Subscribe,
+    peer_scopes: &[String],
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+) -> Result<()> {
+    let sub_id = sub_msg.sub_id;
+
+    // Scope enforcement
+    if !peer_scopes.contains(&sub_msg.scope) {
+        let reject = Message::Response(Response {
+            req_id: 0,
+            status: crate::messages::status::FORBIDDEN,
+            body: format!("scope '{}' not granted", sub_msg.scope).into_bytes(),
+        });
+        messages::write_message(&mut send, &reject).await?;
+        return Ok(());
+    }
+
+    // Look up handler
+    let handler = {
+        let handlers = stream_mgr.handlers.read().await;
+        handlers.get(&sub_msg.scope).cloned()
+    };
+
+    let handler = match handler {
+        Some(h) => h,
+        None => {
+            let reject = Message::Response(Response {
+                req_id: 0,
+                status: crate::messages::status::NOT_FOUND,
+                body: format!("no handler for scope '{}'", sub_msg.scope).into_bytes(),
+            });
+            messages::write_message(&mut send, &reject).await?;
+            return Ok(());
+        }
+    };
+
+    // Create Subscription and dispatch to handler
+    let subscription = Subscription {
+        sub_id: sub_msg.sub_id,
+        scope: sub_msg.scope,
+        body: sub_msg.body,
+    };
+
+    let sub_rx = match handler(subscription).await {
+        Ok(rx) => rx,
+        Err(e) => {
+            let reject = Message::Response(Response {
+                req_id: 0,
+                status: crate::messages::status::ERROR,
+                body: e.to_string().into_bytes(),
+            });
+            messages::write_message(&mut send, &reject).await?;
+            return Ok(());
+        }
+    };
+
+    let SubscriptionReceiver { mut rx, dropped } = sub_rx;
+
+    // Send OK ack -- subscription is active
+    let ack = Message::Response(Response {
+        req_id: 0,
+        status: crate::messages::status::OK,
+        body: vec![],
+    });
+    messages::write_message(&mut send, &ack).await?;
+
+    // Event send loop
+    loop {
+        tokio::select! {
+            event_data = rx.recv() => {
+                match event_data {
+                    Some(body) => {
+                        let drop_count = dropped.swap(0, Ordering::Relaxed);
+                        let event = Message::Event(EventMsg {
+                            sub_id,
+                            body,
+                            dropped_count: drop_count,
+                        });
+                        if messages::write_message(&mut send, &event).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => {
+                        break;
+                    }
+                }
+            }
+            unsub = messages::read_message(&mut recv) => {
+                match unsub {
+                    Ok(Message::Unsubscribe(_)) => {
+                        break;
+                    }
+                    _ => {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
