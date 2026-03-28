@@ -265,3 +265,42 @@ async fn test_subscribe_receive_events() {
     assert!(sub.next().await.is_none());
     println!("test_subscribe_receive_events passed");
 }
+
+#[tokio::test]
+async fn test_subscribe_forbidden_scope() {
+    let dir = TempDir::new().unwrap();
+
+    let mut alice = make_node(&dir, "alice");
+
+    alice
+        .on_subscribe("secret", |sub| async move {
+            let (_, rx) = sub.channel(8);
+            Ok(rx)
+        })
+        .await;
+
+    let alice_addr = alice
+        .listen("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+
+    // Invite only grants "search" scope, not "secret"
+    let token = alice
+        .create_invite(InviteConfig {
+            scopes: vec!["search".into()],
+            max_claims: 1,
+            expires_in: None,
+            connection_hints: vec![alice_addr.to_string()],
+        })
+        .unwrap();
+
+    let bob = make_node(&dir, "bob");
+    let peer = bob.claim_invite(&token.to_link().unwrap()).await.unwrap();
+
+    let result = peer.subscribe("secret", b"").await;
+    assert!(
+        matches!(result, Err(hypha::HyphaError::Forbidden { .. })),
+        "expected Forbidden error"
+    );
+    println!("test_subscribe_forbidden_scope passed");
+}
