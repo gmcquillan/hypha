@@ -364,3 +364,67 @@ async fn test_subscribe_backpressure_drops() {
     assert!(saw_drops, "expected at least one event with dropped_count > 0");
     println!("test_subscribe_backpressure_drops passed");
 }
+
+#[tokio::test]
+async fn test_subscribe_unsubscribe_cleanup() {
+    let dir = TempDir::new().unwrap();
+
+    let mut alice = make_node(&dir, "alice");
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let notify_clone = notify.clone();
+
+    alice
+        .on_subscribe("stream", move |sub| {
+            let notify = notify_clone.clone();
+            async move {
+                let (tx, rx) = sub.channel(8);
+                tokio::spawn(async move {
+                    let mut i = 0u32;
+                    loop {
+                        let body = format!("msg-{i}").into_bytes();
+                        if tx.send(body).is_err() {
+                            // Receiver dropped -- subscriber ended
+                            notify.notify_one();
+                            break;
+                        }
+                        i += 1;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                });
+                Ok(rx)
+            }
+        })
+        .await;
+
+    let alice_addr = alice
+        .listen("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+
+    let token = alice
+        .create_invite(InviteConfig {
+            scopes: vec!["stream".into()],
+            max_claims: 1,
+            expires_in: None,
+            connection_hints: vec![alice_addr.to_string()],
+        })
+        .unwrap();
+
+    let bob = make_node(&dir, "bob");
+    let peer = bob.claim_invite(&token.to_link().unwrap()).await.unwrap();
+
+    let mut sub = peer.subscribe("stream", b"").await.expect("subscribe failed");
+
+    // Read 2 events
+    for _ in 0..2 {
+        assert!(sub.next().await.is_some());
+    }
+
+    // Signal the producer to stop
+    sub.unsubscribe().await.expect("unsubscribe failed");
+
+    // The producer should detect the closed receiver within 2 seconds
+    let notified = tokio::time::timeout(Duration::from_secs(2), notify.notified()).await;
+    assert!(notified.is_ok(), "producer did not detect unsubscribe within 2 seconds");
+    println!("test_subscribe_unsubscribe_cleanup passed");
+}
