@@ -7,6 +7,7 @@ use tracing::{info, warn};
 use crate::capability::{CapabilityToken, InviteConfig};
 use crate::crypto::NodeKeypair;
 use crate::exchange::{Exchange, HandlerFn};
+use crate::stream::{self, StreamManager, SubscribeHandlerFn, SubscriptionStream, SubscriptionReceiver};
 use crate::handshake;
 use crate::messages::{self, Message};
 use crate::store::PeerStore;
@@ -28,6 +29,7 @@ pub struct Peer {
     pub token_id: Vec<u8>,
     connection: quinn::Connection,
     exchange: Arc<Exchange>,
+    stream_mgr: Arc<StreamManager>,
 }
 
 impl Peer {
@@ -73,6 +75,45 @@ impl Peer {
             }),
         }
     }
+
+    /// Open a subscription to this peer for the given scope.
+    pub async fn subscribe(&self, scope: &str, body: &[u8]) -> Result<SubscriptionStream> {
+        let sub_id = self.stream_mgr.next_sub_id().await;
+
+        let (mut send, mut recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|_| HyphaError::ConnectionLost)?;
+
+        let msg = Message::Subscribe(messages::Subscribe {
+            sub_id,
+            scope: scope.to_string(),
+            body: body.to_vec(),
+        });
+        messages::write_message(&mut send, &msg).await?;
+
+        let response = messages::read_message(&mut recv).await?;
+        match response {
+            Message::Response(r) => {
+                if r.status == messages::status::OK {
+                    Ok(SubscriptionStream::new(sub_id, send, recv))
+                } else if r.status == messages::status::FORBIDDEN {
+                    Err(HyphaError::Forbidden {
+                        scope: scope.to_string(),
+                    })
+                } else {
+                    Err(HyphaError::RemoteError {
+                        status: r.status,
+                        message: String::from_utf8_lossy(&r.body).into(),
+                    })
+                }
+            }
+            _ => Err(HyphaError::HandshakeFailed {
+                detail: "unexpected response to subscribe".into(),
+            }),
+        }
+    }
 }
 
 /// A Hypha node — the main entry point for the library.
@@ -80,6 +121,7 @@ pub struct HyphaNode {
     keypair: Arc<NodeKeypair>,
     store: Arc<PeerStore>,
     exchange: Arc<Exchange>,
+    stream_mgr: Arc<StreamManager>,
     key_created_at: u64,
     endpoint: Option<quinn::Endpoint>,
 }
@@ -103,6 +145,7 @@ impl HyphaNode {
             keypair: Arc::new(keypair),
             store: Arc::new(store),
             exchange: Arc::new(Exchange::new()),
+            stream_mgr: Arc::new(StreamManager::new()),
             key_created_at: config.key_created_at,
             endpoint: None,
         })
@@ -124,6 +167,7 @@ impl HyphaNode {
         let keypair = self.keypair.clone();
         let store = self.store.clone();
         let exchange = self.exchange.clone();
+        let stream_mgr = self.stream_mgr.clone();
         let key_created_at = self.key_created_at;
 
         tokio::spawn(async move {
@@ -131,6 +175,7 @@ impl HyphaNode {
                 let keypair = keypair.clone();
                 let store = store.clone();
                 let exchange = exchange.clone();
+                let stream_mgr = stream_mgr.clone();
 
                 tokio::spawn(async move {
                     match incoming.await {
@@ -140,6 +185,7 @@ impl HyphaNode {
                                 &keypair,
                                 &store,
                                 &exchange,
+                                stream_mgr,
                                 key_created_at,
                             )
                             .await
@@ -292,6 +338,7 @@ impl HyphaNode {
             token_id: token.token_id.clone(),
             connection,
             exchange: self.exchange.clone(),
+            stream_mgr: self.stream_mgr.clone(),
         })
     }
 
@@ -312,6 +359,16 @@ impl HyphaNode {
         self.exchange.register_handler(scope, handler).await;
     }
 
+    /// Register a subscribe handler for a scope.
+    pub async fn on_subscribe<F, Fut>(&self, scope: &str, handler: F)
+    where
+        F: Fn(stream::Subscription) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<SubscriptionReceiver>> + Send + 'static,
+    {
+        let handler: SubscribeHandlerFn = Arc::new(move |sub| Box::pin(handler(sub)));
+        self.stream_mgr.register_handler(scope, handler).await;
+    }
+
     /// Get a reference to the peer store.
     pub fn store(&self) -> &PeerStore {
         &self.store
@@ -324,6 +381,7 @@ async fn handle_connection(
     keypair: &NodeKeypair,
     store: &PeerStore,
     exchange: &Exchange,
+    stream_mgr: Arc<StreamManager>,
     key_created_at: u64,
 ) -> Result<()> {
     let remote = conn.remote_address();
@@ -375,13 +433,31 @@ async fn handle_connection(
     // Message processing loop — accept streams and handle requests
     loop {
         match conn.accept_bi().await {
-            Ok((mut send, mut recv)) => {
+            Ok((send, mut recv)) => {
                 let scopes = peer.scopes.clone();
                 match messages::read_message(&mut recv).await {
                     Ok(Message::Request(req)) => {
+                        let mut send = send;
                         exchange.handle_request(req, &scopes, &mut send).await?;
                     }
+                    Ok(Message::Subscribe(sub_msg)) => {
+                        let stream_mgr = stream_mgr.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = stream::handle_subscribe(
+                                &stream_mgr,
+                                sub_msg,
+                                &scopes,
+                                send,
+                                recv,
+                            )
+                            .await
+                            {
+                                warn!("subscribe handler error: {e}");
+                            }
+                        });
+                    }
                     Ok(Message::Whereis(w)) => {
+                        let mut send = send;
                         if let Some(ls) =
                             crate::discovery::handle_whereis(store, &w)?
                         {
