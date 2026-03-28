@@ -60,10 +60,6 @@ impl SubscriptionSender {
         }
     }
 
-    /// Get a reference to the drop counter (used by the event send loop).
-    pub(crate) fn dropped_counter(&self) -> Arc<AtomicU32> {
-        self.dropped.clone()
-    }
 }
 
 /// Runtime-side receiver that pairs with a SubscriptionSender.
