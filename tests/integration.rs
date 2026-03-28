@@ -304,3 +304,63 @@ async fn test_subscribe_forbidden_scope() {
     );
     println!("test_subscribe_forbidden_scope passed");
 }
+
+#[tokio::test]
+async fn test_subscribe_backpressure_drops() {
+    let dir = TempDir::new().unwrap();
+
+    let mut alice = make_node(&dir, "alice");
+
+    alice
+        .on_subscribe("firehose", |sub| async move {
+            let (tx, rx) = sub.channel(2);
+            tokio::spawn(async move {
+                for i in 0u8..20 {
+                    let body = format!("burst-{i}").into_bytes();
+                    if tx.send(body).is_err() {
+                        break;
+                    }
+                }
+                // Keep tx alive so the subscription remains open
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            });
+            Ok(rx)
+        })
+        .await;
+
+    let alice_addr = alice
+        .listen("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+
+    let token = alice
+        .create_invite(InviteConfig {
+            scopes: vec!["firehose".into()],
+            max_claims: 1,
+            expires_in: None,
+            connection_hints: vec![alice_addr.to_string()],
+        })
+        .unwrap();
+
+    let bob = make_node(&dir, "bob");
+    let peer = bob.claim_invite(&token.to_link().unwrap()).await.unwrap();
+
+    let mut sub = peer.subscribe("firehose", b"").await.expect("subscribe failed");
+
+    let mut saw_drops = false;
+    for _ in 0..10 {
+        match sub.next().await {
+            Some(event) => {
+                if event.dropped_count > 0 {
+                    saw_drops = true;
+                }
+            }
+            None => break,
+        }
+    }
+
+    sub.unsubscribe().await.expect("unsubscribe failed");
+
+    assert!(saw_drops, "expected at least one event with dropped_count > 0");
+    println!("test_subscribe_backpressure_drops passed");
+}
