@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hypha::capability::InviteConfig;
@@ -210,4 +211,57 @@ async fn test_revocation() {
     let result = charlie.claim_invite(&link).await;
     assert!(result.is_err(), "Post-revocation claim should have failed");
     println!("Revocation correctly enforced");
+}
+
+#[tokio::test]
+async fn test_subscribe_receive_events() {
+    let dir = TempDir::new().unwrap();
+
+    let mut alice = make_node(&dir, "alice");
+
+    alice
+        .on_subscribe("events", |sub| async move {
+            let (tx, rx) = sub.channel(8);
+            tokio::spawn(async move {
+                for i in 0..3u8 {
+                    let body = format!("event-{i}").into_bytes();
+                    if tx.send(body).is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                // tx drops here, ending the subscription
+            });
+            Ok(rx)
+        })
+        .await;
+
+    let alice_addr = alice
+        .listen("127.0.0.1:0".parse().unwrap())
+        .await
+        .expect("alice listen failed");
+
+    let token = alice
+        .create_invite(InviteConfig {
+            scopes: vec!["events".into()],
+            max_claims: 1,
+            expires_in: None,
+            connection_hints: vec![alice_addr.to_string()],
+        })
+        .unwrap();
+
+    let bob = make_node(&dir, "bob");
+    let peer = bob.claim_invite(&token.to_link().unwrap()).await.unwrap();
+
+    let mut sub = peer.subscribe("events", b"").await.expect("subscribe failed");
+
+    for i in 0..3u8 {
+        let event = sub.next().await.expect("expected event");
+        assert_eq!(event.body, format!("event-{i}").into_bytes());
+        assert_eq!(event.dropped_count, 0);
+    }
+
+    // Producer ended -- next() should return None
+    assert!(sub.next().await.is_none());
+    println!("test_subscribe_receive_events passed");
 }
